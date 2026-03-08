@@ -1,4 +1,4 @@
-from
+from LoopModels import backbones
 import torch.nn as nn
 
 def get_backbone(backbone_arch: str = 'resnet50', backbone_config = {}, vggt_long_config = None) -> nn.Module:

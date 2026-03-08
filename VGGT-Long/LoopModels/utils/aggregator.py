@@ -27,5 +27,5 @@ def get_aggregator(aggregator_arch: str = "ConvAP", aggregator_config = {}) -> n
         assert 'num_clusters' in aggregator_config
         assert 'cluster_dim' in aggregator_config
         assert 'token_dim' in aggregator_config
-        return aggregators.SALAD(**aggregator_config)
+        return aggregators.Salad(**aggregator_config)
     raise NotImplementedError(f"Unknown aggregator architecture {aggregator_arch}")

@@ -1,4 +1,3 @@
-import torch
 from torch import Tensor
 import torch.nn.functional as F
 import torch.nn as nn
@@ -10,7 +9,7 @@ class ConvAP(nn.Module):
         out_channels: int = 512,
         s1: int = 2,
         s2: int = 2,
-    ):
+    ) -> None:
         """
         :param in_channels: Number of channels in the input of ConvAP.
         :param out_channels: Number of channels that ConvAP outputs.
@@ -24,6 +23,7 @@ class ConvAP(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         x = self.channel_pool(x)
         x = self.AAP(x)
-        x = F.normalize(x.flatten(1), p=2, dim=1)
+        x = x.flatten(1)
+        x = F.normalize(x, p=2, dim=1)
         return x
 

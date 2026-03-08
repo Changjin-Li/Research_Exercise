@@ -2,7 +2,7 @@ import torch
 from torch import Tensor
 import torch.nn as nn
 
-DINOV2_ARCHS = {
+DINOv2_ARCHS = {
     'dinov2_vits14': 384,
     'dinov2_vitb14': 768,
     'dinov2_vitl14': 1024,
@@ -26,10 +26,10 @@ class DINOv2(nn.Module):
         :param return_token: If True, the forward pass returns both the feature map and the token.
         """
         super().__init__()
-        assert model_name in DINOV2_ARCHS.keys(), f"Unknown model name: {model_name}"
+        assert model_name in DINOv2_ARCHS.keys(), f"Unknown model name: {model_name}"
         self.model = torch.hub.load("./LoopModels/dinov2", model_name, source='local', pretrained=False)
         self.model.load_state_dict(torch.load(vggt_long_config['Weights']['DINO']))
-        self.num_channels = DINOV2_ARCHS[model_name]
+        self.num_channels = DINOv2_ARCHS[model_name]
         self.num_trainable_blocks = num_trainable_blocks
         self.norm_layer = norm_layer
         self.return_token = return_token
