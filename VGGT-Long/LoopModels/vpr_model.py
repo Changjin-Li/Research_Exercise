@@ -170,5 +170,22 @@ class VPRModel(pl.LightningModule):
 
             r_list = feats[:num_references]
             q_list = feats[num_references:]
-            pitts_dict =
+            pitts_dict = utils.get_validation_recalls(
+                r_list=r_list,
+                q_list=q_list,
+                k_values=[1, 5, 10, 20, 30, 50, 100],
+                gt=positives,
+                print_results=True,
+                dataset_name=val_set_name,
+                faiss_gpu=self.faiss_gpu,
+            )
+            del r_list, q_list, feats, num_references, positives
+
+            self.log(f"{val_set_name}/R1", pitts_dict[1], prog_bar=False, logger=True)
+            self.log(f"{val_set_name}/R5", pitts_dict[5], prog_bar=False, logger=True)
+            self.log(f"{val_set_name}/R10", pitts_dict[10], prog_bar=False, logger=True)
+        print('\n\n')
+        
+        # reset the outputs list
+        self.val_outputs = []
 
