@@ -1,1 +1,1 @@
-from solve_python import solve_system_py
+from .solve_python import solve_system_py
