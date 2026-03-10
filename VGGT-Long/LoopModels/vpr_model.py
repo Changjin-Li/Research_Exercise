@@ -185,7 +185,7 @@ class VPRModel(pl.LightningModule):
             self.log(f"{val_set_name}/R5", pitts_dict[5], prog_bar=False, logger=True)
             self.log(f"{val_set_name}/R10", pitts_dict[10], prog_bar=False, logger=True)
         print('\n\n')
-        
+
         # reset the outputs list
         self.val_outputs = []
 
