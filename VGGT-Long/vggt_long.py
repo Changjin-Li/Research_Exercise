@@ -12,6 +12,7 @@ from PIL import Image
 from pathlib import Path
 from tqdm.auto import tqdm
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -29,7 +30,7 @@ except ImportError:
 from base_models.base_model import VGGTAdapter, Pi3Adapter, MapAnythingAdapter
 from LoopModels import LoopDetector
 from LoopModelDBoW import RetrievalDBow
-from loop_utils import Sim3LoopOptimizer, load_config
+from loop_utils import Sim3LoopOptimizer, load_config, process_loop_list, weighted_align_point_maps
 
 def remove_duplicates(data_list):
     """data_list: [(67, (3386, 3406), 48, (2435, 2455)), ...]"""
@@ -184,3 +185,67 @@ class VGGTLong:
         return predictions if is_loop or range_2 is not None else None
 
     def process_long_sequence(self):
+        if self.overlap >= self.chunk_size:
+            raise ValueError(f"[SETTING ERROR] Overlap ({self.overlap}) must be less than chunk size ({self.chunk_size})")
+        if len(self.img_list) <= self.chunk_size:
+            num_chunks = 1
+            self.chunk_indices = [(0, len(self.img_list))]
+        else:
+            step = self.chunk_size - self.overlap
+            num_chunks = (len(self.img_list) - self.overlap + step - 1) // step
+            self.chunk_indices = []
+            for i in range(num_chunks):
+                start_idx = i * step
+                end_idx = min(start_idx + self.chunk_size, len(self.img_list))
+                self.chunk_indices.append((start_idx, end_idx))
+
+        for chunk_idx in range(len(self.chunk_indices)):
+            print(f'[Progress]: {chunk_idx}/{len(self.chunk_indices)-1}')
+            self.process_single_chunk(self.chunk_indices[chunk_idx], chunk_idx=chunk_idx)
+            torch.cuda.empty_cache()    # 释放当前 GPU 上由 PyTorch 的缓存分配器持有的未使用的缓存内存
+
+        if self.loop_enable:
+            print('Loop SIM(3) estimating...')
+            loop_results = process_loop_list(self.chunk_indices, self.loop_list, int(self.config['Model']['loop_chunk_size'] / 2))
+            loop_results = remove_duplicates(loop_results)
+            print(loop_results)
+            # return e.g. (31, (1574, 1594), 2, (129, 149))
+            for item in loop_results:
+                single_chunk_predictions = self.process_single_chunk(range_1=item[1], range_2=item[3], is_loop=True)
+                self.loop_predict_list.append((item, single_chunk_predictions))
+                print(item)
+        print(f"Processing {len(self.img_list)} images in {num_chunks} chunks of size {self.chunk_size} with {self.overlap} overlap")
+
+        del self.model
+        torch.cuda.empty_cache()
+
+        print("Aligning all the chunks...")
+        for chunk_idx in range(len(self.chunk_indices)-1):
+            print(f"Aligning {chunk_idx} and {chunk_idx + 1} (Total {len(self.chunk_indices) - 1})")
+            chunk_data1 = np.load(os.path.join(self.result_unaligned_dir, f"chunk_{chunk_idx}.npy"), allow_pickle=True).item()
+            chunk_data2 = np.load(os.path.join(self.result_unaligned_dir, f"chunk_{chunk_idx + 1}.npy"), allow_pickle=True).item()
+            point_map1 = chunk_data1['world_points'][-self.overlap:]
+            point_map2 = chunk_data2['world_points'][:self.overlap]
+            conf1 = chunk_data1['world_points_conf'][-self.overlap:]
+            conf2 = chunk_data2['world_points_conf'][:self.overlap]
+
+            mask = None
+            if chunk_data1['mask'] is not None:
+                mask1 = chunk_data1['mask'][-self.overlap:]
+                mask2 = chunk_data2['mask'][:self.overlap]
+                mask = mask1.unsqueeze() & mask2.unsqueeze()
+
+            conf_threshold = min(np.median(conf1), np.median(conf2)) * 0.1
+            s, R, t = weighted_align_point_maps(point_map1, conf1, point_map2, conf2, mask, conf_threshold, self.config)
+            print("Estimated Scale:", s)
+            print("Estimated Rotation:\n", R)
+            print("Estimated Translation:", t)
+            self.sim3_list.append((s, R, t))
+
+        if self.loop_enable:
+            pass # TODO: loop align
+
+        print('Done.')
+
+    def run(self):
+        print(f"Loading images from {self.img_dir}...")

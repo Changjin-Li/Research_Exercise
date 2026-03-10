@@ -327,3 +327,135 @@ def save_ply(points: np.ndarray, colors: np.ndarray, filename: str):
         write_ply_header(f, len(points))
         write_ply_batch(f, points, colors)
 
+
+def find_chunk_index(chunks, idx):
+    """
+    Find the 0-based chunk index that contains the given index idx.
+    Args:
+        chunks: List of (begin_idx, end_idx).
+        idx: The index to search for.
+    Returns:
+        Returns the 0-based chunk index.
+    """
+    starts = [chunk[0] for chunk in chunks]
+    pos = bisect.bisect_right(starts, idx) - 1
+    if pos < 0 or pos >= len(chunks):
+        raise ValueError(f"Index {idx} not found in any chunk")
+    chunk_begin, chunk_end = chunks[pos]
+    if idx < chunk_begin or idx > chunk_end:
+        raise ValueError(f"Index {idx} not found in any chunk")
+    return pos
+
+def get_frame_range(chunk, idx, half_window=10):
+    """
+    Calculate the frame range centered at idx with half_window frames on each side within chunk boundaries.
+    If near boundaries, take 2 * half_window frames starting from the boundary.
+    Args:
+        chunk: (begin_idx, end_idx).
+        idx: Center index.
+        half_window: Number of frames to take on each side of center index.
+    Returns:
+        (start, end).
+    """
+    begin, end = chunk
+    window_size = 2 * half_window
+    if idx - half_window < begin:
+        start = begin
+        end = min(begin + window_size, end)
+    elif idx + half_window > end:
+        start = max(end - window_size, begin)
+    else:
+        start = idx - half_window
+        end = idx + half_window
+    return start, end
+
+def process_loop_list(self, chunk_index, loop_list, half_window=10):
+    """
+    Process loop_list and return chunk indices and frame ranges for each (idx1, idx2) pair.
+    Args:
+        - chunk_index: List of (begin_idx, end_idx) tuples.
+        - loop_list: List of (idx1, idx2) tuples.
+        - half_window: Number of frames to take on each side of center index (default 10).
+    Returns:
+        Returns list of (chunk_idx1, range1, chunk_idx2, range2) tuples where:
+        - chunk_idx1, chunk_idx2: Chunk indices (1-based).
+        - range1, range2: Frame range tuples (start, end).
+    """
+    results = []
+    for idx1, idx2 in loop_list:
+        try:
+            chunk_idx1_0based = find_chunk_index(chunk_index, idx1)
+            chunk1 = chunk_index[chunk_idx1_0based]
+            range1 = get_frame_range(chunk1, idx1, half_window)
+            chunk_idx2_0based = find_chunk_index(chunk_index, idx2)
+            chunk2 = chunk_index[chunk_idx2_0based]
+            range2 = get_frame_range(chunk2, idx2, half_window)
+            results.append((chunk_idx1_0based, range1, chunk_idx2_0based, range2))
+        except ValueError as e:
+            print(f"Skipping pair ({idx1}, {idx2}): {e}")
+
+    return results
+
+
+def robust_weighted_estimate_sim3(src, tgt, init_weights, delta=0.1, max_iters=20, tol=1e-9, using_sim3=True):
+    """
+    src:  (Nx3)
+    tgt:  (Nx3)
+    init_weights:  (N,)
+    """
+    s, R, t = np.zeros((1, 3, 3)), np.zeros((1, 3, 3)), np.zeros((1, 3, 1))
+    return s, R, t
+
+def robust_weighted_estimate_sim3_numba(src, tgt, init_weights, delta=0.1, max_iters=20, tol=1e-9, using_sim3=True):
+    src = src.astype(np.float32)
+    tgt = tgt.astype(np.float32)
+    init_weights = init_weights.astype(np.float32)
+
+    s, R, t = np.zeros((1, 3, 3)), np.zeros((1, 3, 3)), np.zeros((1, 3, 1))
+    return s, R, t
+
+def weighted_align_point_maps(point_map1, conf1, point_map2, conf2, mask, conf_threshold, config):
+    """point_map2 -> point_map1"""
+    b1 = point_map1.shape[0]
+    b2 = point_map2.shape[0]
+    b = min(b1, b2)
+
+    align_points1 = []
+    align_points2 = []
+    confidence_weights = []
+
+    for i in range(b):
+        mask1 = conf1[i] > conf_threshold
+        mask2 = conf2[i] > conf_threshold
+        valid_mask = mask1 & mask2
+        if mask is not None:
+            valid_mask = valid_mask & mask[i].squeeze()
+
+        idx = np.where(valid_mask)
+        if len(idx[0]) == 0: continue
+
+        pts1 = point_map1[i][idx]
+        pts2 = point_map2[i][idx]
+        combined_conf = np.sqrt(conf1[i][idx] * conf2[i][idx])
+        align_points1.append(pts1)
+        align_points2.append(pts2)
+        confidence_weights.append(combined_conf)
+
+    if len(align_points1) == 0:
+        raise ValueError("No matching point pairs were found!")
+
+    all_pts1 = np.concatenate(align_points1, axis=0)
+    all_pts2 = np.concatenate(align_points2, axis=0)
+    all_weights = np.concatenate(confidence_weights, axis=0)
+    print(f"The number of corresponding points matched: {all_pts1.shape[0]}")
+
+    if config['Model']['align_method'] == 'numba':
+        s, R, t = robust_weighted_estimate_sim3_numba(all_pts2, all_pts1, all_weights, delta=config['Model']['IRLS']['delta'], max_iters=config['Model']['IRLS']['max_iters'], tol=eval(config['Model']['IRLS']['tol']), using_sim3=config['Model']['using_sim3'])
+    else:
+        s, R, t = robust_weighted_estimate_sim3(all_pts2, all_pts1, all_weights, delta=config['Model']['IRLS']['delta'], max_iters=config['Model']['IRLS']['max_iters'], tol=eval(config['Model']['IRLS']['tol']), using_sim3=config['Model']['using_sim3'])
+
+    mean_error = compute_alignment_error(point_map1, conf1, point_map2, conf2, conf_threshold, s, R, t)
+    print(f'Mean error: {mean_error}')
+
+    return s, R, t
+
