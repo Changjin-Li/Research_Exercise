@@ -4,6 +4,8 @@ import trimesh
 import glob
 import bisect
 from numba import njit
+from torch.ao.quantization.utils import weight_is_quantized
+
 
 def accumulate_sim3_transforms(transforms):
     """
@@ -466,3 +468,61 @@ def compute_sim3_ab(S_a, S_b):
     R_ab = R_b @ R_a.T
     t_ab = t_b - s_ab * (R_ab @ t_a)
     return s_ab, R_ab, t_ab
+
+
+def merge_ply_files(input_dir, output_path):
+    """
+    Merge all PLY files in a directory into one file (without loading into memory).
+    Args:
+    - input_dir: Input directory containing multiple '{idx}_pcd.ply' files
+    - output_path: Output file path (e.g., 'combined.ply')
+    """
+    input_files = sorted(glob.glob(os.path.join(input_dir, '*_pcd.ply')))
+    if not  input_files:
+        print("No PLY files found.")
+        return
+
+    idx_file = 0
+    all_file_num = len(input_files)
+
+    total_vertices = 0
+    for file in input_files: # Count total vertices
+        with open(file, 'rb') as f:
+            for line in f:
+                if line.startswith(b'element vertex'):
+                    vertex_count = int(line.split()[-1])
+                    total_vertices += vertex_count
+                elif line.startswith(b'end_header'):
+                    break
+
+    with open(output_path, 'wb') as out_f:
+        # Write new header
+        out_f.write(b"ply\n")
+        out_f.write(b"format binary_little_endian 1.0\n")
+        out_f.write(f"element vertex {total_vertices}\n".encode())
+        out_f.write(b"property float x\n")
+        out_f.write(b"property float y\n")
+        out_f.write(b"property float z\n")
+        out_f.write(b"property uchar red\n")
+        out_f.write(b"property uchar green\n")
+        out_f.write(b"property uchar blue\n")
+        out_f.write(b"end_header\n")
+
+        for file in input_files:
+            # print(f'{idx_file}/{all_file_num}')
+            idx_file += 1
+            with open(file, 'rb') as in_f:
+                # Skip the head
+                in_header = True
+                while in_header:
+                    line = in_f.readline()
+                    if line.startswith(b'end_header'):
+                        in_header = False
+
+                chunk_size = 1024 * 1024 * 10  # 10MB
+                while True:
+                    chunk = in_f.read(chunk_size)
+                    if not chunk: break
+                    out_f.write(chunk)
+    print(f"Merge completed! Total points: {total_vertices}")
+    print(f"Output file: {output_path}")

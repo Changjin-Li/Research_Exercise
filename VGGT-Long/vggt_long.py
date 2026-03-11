@@ -2,7 +2,6 @@ import numpy as np
 import argparse
 import os
 import glob
-import threading
 import torch
 import cv2
 import gc
@@ -12,6 +11,9 @@ from PIL import Image
 from pathlib import Path
 from tqdm.auto import tqdm
 import matplotlib
+
+from loop_utils.sim3utils import accumulate_sim3_transforms, apply_sim3_direct, save_confident_pointcloud_batch
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -330,7 +332,48 @@ class VGGTLong:
             plt.close()
 
         print('Apply alignment...')
+        self.sim3_list = accumulate_sim3_transforms(self.sim3_list)
+        for chunk_idx in range(len(self.chunk_indices) - 1):
+            print(f'Applying {chunk_idx + 1} -> {chunk_idx} (Total {len(self.chunk_indices) - 1})')
+            s, R, t = self.sim3_list[chunk_idx]
 
+            chunk_data = np.load(os.path.join(self.result_unaligned_dir, f"chunk_{chunk_idx + 1}.npy"), allow_pickle=True).item()
+            chunk_data['world_points'] = apply_sim3_direct(chunk_data['world_points'], s, R, t)
+            aligned_path = os.path.join(self.result_aligned_dir, f"chunk_{chunk_idx + 1}.npy")
+            np.save(aligned_path, chunk_data)
+
+            if chunk_idx == 0:
+                chunk_data_first = np.load(os.path.join(self.result_unaligned_dir, "chunk_0.npy"), allow_pickle=True).item()
+                np.save(os.path.join(self.result_aligned_dir, "chunk_0.npy"), chunk_data_first)
+
+                points_first = chunk_data_first['world_points'].reshape(-1, 3)
+                colors_first = (chunk_data_first['images'].transpose(0, 2, 3, 1).reshape(-1, 3) * 255).astype(np.uint8)
+                confs_first = chunk_data_first['world_points_conf'].reshape(-1)
+                ply_path_first = os.path.join(self.pcd_dir, "0_pcd.ply")
+                save_confident_pointcloud_batch(
+                    points=points_first,    # shape: (H, W, 3)
+                    colors=colors_first,    # shape: (H, W, 3)
+                    confs=confs_first,      # shape: (H, W)
+                    output_path=ply_path_first,
+                    conf_threshold=np.mean(confs_first) * self.config['Model']['Pointcloud_Save']['conf_threshold_coef'],
+                    sample_ratio=self.config['Model']['Pointcloud_Save']['sample_ratio'],
+                )
+
+            aligned_chunk_data = np.load(os.path.join(self.result_aligned_dir, f"chunk_{chunk_idx}.npy"), allow_pickle=True).item() if chunk_idx > 0 else chunk_data_first
+            points = aligned_chunk_data['world_points'].reshape(-1, 3)
+            colors = (aligned_chunk_data['images'].transpose(0, 2, 3, 1).reshape(-1, 3) * 255).astype(np.uint8)
+            confs = aligned_chunk_data['world_points_conf'].reshape(-1)
+            ply_path = os.path.join(self.pcd_dir, f"{chunk_idx + 1}_pcd.ply")
+            save_confident_pointcloud_batch(
+                points=points,    # shape: (H, W, 3)
+                colors=colors,    # shape: (H, W, 3)
+                confs=confs,      # shape: (H, W)
+                output_path=ply_path,
+                conf_threshold=np.mean(confs) * self.config['Model']['Pointcloud_Save']['conf_threshold_coef'],
+                sample_ratio=self.config['Model']['Pointcloud_Save']['sample_ratio'],
+            )
+
+        self.save_camera_poses()
         print('Done.')
 
     def run(self):
@@ -475,4 +518,63 @@ class VGGTLong:
                 os.remove(file_path)
         print('Deleting temp files done.')
         print(f"Saved disk space: {total_space / 1024 / 1024 / 1024:.4f} GiB.")
+
+
+#------------------------------------------------------------------------------------------------------------------------------
+import shutil
+from loop_utils.sim3utils import warmup_numba, merge_ply_files
+
+
+def copy_file(src_path: str, dst_dir: str):
+    try:
+        os.makedirs(dst_dir, exist_ok=True)
+        dst_path = os.path.join(dst_dir, os.path.basename(src_path))
+        shutil.copy2(src_path, dst_path)
+        print(f"config yaml file has been copied to: {dst_path}")
+        return dst_path
+    except FileNotFoundError:
+        print("File Not Found")
+    except PermissionError:
+        print("Permission Error")
+    except Exception as e:
+        print(f"Copy Error: {e}")
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='VGGT-Long')
+    parser.add_argument('--image_dir', type=str, required=True, help='Image path')
+    parser.add_argument('--config', type=str, required=False, default='./configs/base_config.yaml', help='config path')
+    args = parser.parse_args()
+
+    config = load_config(args.config)
+
+    image_dir = args.image_dir
+    path = image_dir.split("/")
+    current_datetime = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    exp_dir = './exps'
+
+    save_dir = os.path.join(exp_dir, image_dir.replace("/", "_"), current_datetime)
+
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+        print(f'The exp will be saved under dir: {save_dir}')
+        copy_file(args.config, save_dir)
+
+    if config['Model']['align_method'] == 'numba':
+        warmup_numba()
+
+    vggt_long = VGGTLong(image_dir, save_dir, config)
+    vggt_long.run()
+    vggt_long.close()
+
+    del vggt_long
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    all_ply_path = os.path.join(save_dir, f'pcd/combined_pcd.ply')
+    input_dir = os.path.join(save_dir, f'pcd')
+    print("Saving all the point clouds")
+    merge_ply_files(input_dir, all_ply_path)
+    print('All done.')
+    sys.exit()
 
