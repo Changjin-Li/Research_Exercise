@@ -11,9 +11,6 @@ from PIL import Image
 from pathlib import Path
 from tqdm.auto import tqdm
 import matplotlib
-
-from loop_utils.sim3utils import accumulate_sim3_transforms, apply_sim3_direct, save_confident_pointcloud_batch
-
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -31,7 +28,8 @@ except ImportError:
 from base_models.base_model import VGGTAdapter, Pi3Adapter, MapAnythingAdapter
 from LoopModels import LoopDetector
 from LoopModelDBoW import RetrievalDBow
-from loop_utils import Sim3LoopOptimizer, load_config, process_loop_list, weighted_align_point_maps, compute_sim3_ab
+from loop_utils import (Sim3LoopOptimizer, load_config, process_loop_list, weighted_align_point_maps, compute_sim3_ab,
+                        accumulate_sim3_transforms, apply_sim3_direct, save_confident_pointcloud_batch)
 
 def remove_duplicates(data_list):
     """data_list: [(67, (3386, 3406), 48, (2435, 2455)), ...]"""
@@ -522,7 +520,7 @@ class VGGTLong:
 
 #------------------------------------------------------------------------------------------------------------------------------
 import shutil
-from loop_utils.sim3utils import warmup_numba, merge_ply_files
+from loop_utils import warmup_numba, merge_ply_files
 
 
 def copy_file(src_path: str, dst_dir: str):
