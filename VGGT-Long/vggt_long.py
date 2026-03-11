@@ -87,7 +87,7 @@ class VGGTLong:
         self.img_dir = image_dir
         self.img_list = None
         self.delete_temp_files = self.config['Model']['delete_temp_files']
-        self.out_dir = save_dir
+        self.output_dir = save_dir
         self.result_unaligned_dir = os.path.join(save_dir, '_tmp_results_unaligned')
         self.result_aligned_dir = os.path.join(save_dir, '_tmp_results_aligned')
         self.result_loop_dir = os.path.join(save_dir, '_tmp_results_loop')
@@ -249,3 +249,118 @@ class VGGTLong:
 
     def run(self):
         print(f"Loading images from {self.img_dir}...")
+        self.img_list = sorted(glob.glob(os.path.join(self.img_dir, '*.jpg')) + glob.glob(os.path.join(self.img_dir, '*.png')))
+        if len(self.img_list) == 0:
+            raise ValueError(f"[DIR EMPTY] No images found in {self.img_dir}!")
+        print(f"Found {len(self.img_list)} images.")
+
+        if self.loop_enable:
+            self.get_loop_pairs()
+            if self.useDBoW:
+                self.retrieval.close()
+                gc.collect()
+            else:
+                del self.loop_detector
+
+        torch.cuda.empty_cache()
+        print('Loading model...')
+        self.model.load()
+
+        if self.config['Model']['calib']:
+            calib_path = Path(self.img_dir).parent / 'calib.txt'
+            k, p2_matrix = extract_p2_k_matrix(calib_path)
+            self.model.k = k
+
+        self.process_long_sequence()
+
+    def save_camera_poses(self):
+        """
+        Save camera poses from all chunks to txt and ply files.
+        - txt file: Each line contains a 4x4 C2W matrix flattened into 16 numbers.
+        - ply file: Camera poses visualized as points with different colors for each chunk.
+        """
+        chunk_colors = [
+            [255, 0, 0],    # Red
+            [0, 255, 0],    # Green
+            [0, 0, 255],    # Blue
+            [255, 255, 0],  # Yellow
+            [255, 0, 255],  # Magenta
+            [0, 255, 255],  # Cyan
+            [128, 0, 0],    # Dark Red
+            [0, 128, 0],    # Dark Green
+            [0, 0, 128],    # Dark Blue
+            [128, 128, 0],  # Olive
+        ]
+        print("Saving all camera poses to txt file...")
+        all_poses = [None] * len(self.img_list)
+        all_intrinsics = [None] * len(self.img_list)
+
+        first_chunk_range, first_chunk_extrinsics = self.all_camera_poses[0]
+        _, first_chunk_intrinsics = self.all_camera_intrinsics[0]
+        for i, idx in enumerate(range(first_chunk_range[0], first_chunk_range[1])):
+            all_poses[idx] = first_chunk_extrinsics[i]
+            if first_chunk_intrinsics is not None:
+                all_intrinsics[idx] = first_chunk_intrinsics[i]
+
+        for chunk_idx in range(1, len(self.all_camera_poses)):
+            chunk_range, chunk_extrinsics = self.all_camera_poses[chunk_idx]
+            _, chunk_intrinsics = self.all_camera_intrinsics[chunk_idx]
+            s, R, t = self.sim3_list[chunk_idx - 1]     # When call self.save_camera_poses(), all the sim3 are aligned to the first chunk.
+            S = np.eye(4)
+            S[:3, :3] = s * R
+            S[:3, 3] = t
+            for i, idx in enumerate(range(chunk_range[0], chunk_range[1])):
+                c2w = chunk_extrinsics[i]
+                transform_c2w = S @ c2w     # Be aware of the left multiplication!
+                transform_c2w[:3, :3] /= s  # Normalize rotation.
+                all_poses[idx] = transform_c2w
+                if chunk_intrinsics is not None:
+                    all_intrinsics[idx] = chunk_intrinsics[i]
+
+        poses_path = os.path.join(self.output_dir, 'camera_poses.txt')
+        with open(poses_path, 'w') as f:
+            for pose in all_poses:
+                flat_pose = pose.flatten()
+                f.write(' '.join([str(x) for x in flat_pose]) + '\n')
+        print(f"Camera poses saved to {poses_path}.")
+
+        if all_intrinsics[0] is not None:
+            intrinsics_path = os.path.join(self.output_dir, 'intrinsic.txt')
+            with open(intrinsics_path, 'w') as f:
+                for intrinsic in all_intrinsics:
+                    fx = intrinsic[0, 0]
+                    fy = intrinsic[1, 1]
+                    cx = intrinsic[0, 2]
+                    cy = intrinsic[1, 2]
+                    f.write(f'{fx} {fy} {cx} {cy}\n')
+            print(f"Camera intrinsics saved to {intrinsics_path}.")
+
+        ply_path = os.path.join(self.output_dir, 'camera_poses.ply')
+        with open(ply_path, 'w') as f:  # Write PLY header
+            f.write('ply\n')
+            f.write('format ascii 1.0\n')
+            f.write(f'element vertex {len(all_poses)}\n')
+            f.write('property float x\n')
+            f.write('property float y\n')
+            f.write('property float z\n')
+            f.write('property uchar red\n')
+            f.write('property uchar green\n')
+            f.write('property uchar blue\n')
+            f.write('end_header\n')
+
+            color = chunk_colors[0]
+            for pose in all_poses:
+                position = pose[:3, 3]
+                f.write(f'{position[0]} {position[1]} {position[2]} {color[0]} {color[1]} {color[2]}\n')
+        print(f"Camera poses visualization saved to {ply_path}.")
+
+    def close(self):
+        """
+        Clean up temporary files and calculate reclaimed disk space.
+        This method deletes all temporary files generated during processing from three directories:
+        - Unaligned results
+        - Aligned results
+        - Loop results
+        ~50 GiB for 4500-frame KITTI 00, ~35 GiB for 2700-frame KITTI 05, or ~5 GiB for 300-frame short seq.
+        """
+        
