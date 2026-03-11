@@ -404,7 +404,7 @@ def robust_weighted_estimate_sim3(src, tgt, init_weights, delta=0.1, max_iters=2
     init_weights:  (N,)
     """
     s, R, t = np.zeros((1, 3, 3)), np.zeros((1, 3, 3)), np.zeros((1, 3, 1))
-    return s, R, t
+    return s, R, t # TODO
 
 def robust_weighted_estimate_sim3_numba(src, tgt, init_weights, delta=0.1, max_iters=20, tol=1e-9, using_sim3=True):
     src = src.astype(np.float32)
@@ -412,7 +412,7 @@ def robust_weighted_estimate_sim3_numba(src, tgt, init_weights, delta=0.1, max_i
     init_weights = init_weights.astype(np.float32)
 
     s, R, t = np.zeros((1, 3, 3)), np.zeros((1, 3, 3)), np.zeros((1, 3, 1))
-    return s, R, t
+    return s, R, t # TODO
 
 def weighted_align_point_maps(point_map1, conf1, point_map2, conf2, mask, conf_threshold, config):
     """point_map2 -> point_map1"""
@@ -459,3 +459,10 @@ def weighted_align_point_maps(point_map1, conf1, point_map2, conf2, mask, conf_t
 
     return s, R, t
 
+def compute_sim3_ab(S_a, S_b):
+    s_a, R_a, t_a = S_a
+    s_b, R_b, t_b = S_b
+    s_ab = s_b / s_a
+    R_ab = R_b @ R_a.T
+    t_ab = t_b - s_ab * (R_ab @ t_a)
+    return s_ab, R_ab, t_ab

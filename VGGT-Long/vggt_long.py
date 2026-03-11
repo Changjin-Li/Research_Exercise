@@ -12,7 +12,6 @@ from PIL import Image
 from pathlib import Path
 from tqdm.auto import tqdm
 import matplotlib
-
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -30,7 +29,7 @@ except ImportError:
 from base_models.base_model import VGGTAdapter, Pi3Adapter, MapAnythingAdapter
 from LoopModels import LoopDetector
 from LoopModelDBoW import RetrievalDBow
-from loop_utils import Sim3LoopOptimizer, load_config, process_loop_list, weighted_align_point_maps
+from loop_utils import Sim3LoopOptimizer, load_config, process_loop_list, weighted_align_point_maps, compute_sim3_ab
 
 def remove_duplicates(data_list):
     """data_list: [(67, (3386, 3406), 48, (2435, 2455)), ...]"""
@@ -243,7 +242,94 @@ class VGGTLong:
             self.sim3_list.append((s, R, t))
 
         if self.loop_enable:
-            pass # TODO: loop align
+            for item in self.loop_predict_list:
+                chunk_idx_a = item[0][0]
+                chunk_idx_b = item[0][2]
+                chunk_a_range = item[0][1]
+                chunk_b_range = item[0][3]
+
+                print("chunk_a align")
+                point_map_loop = item[1]['world_points'][:chunk_a_range[1] - chunk_a_range[0]]
+                conf_loop = item[1]['world_points_conf'][:chunk_a_range[1] - chunk_a_range[0]]
+                chunk_a_rela_begin = chunk_a_range[0] - self.chunk_indices[chunk_idx_a][0]
+                chunk_a_rela_end = chunk_a_rela_begin + chunk_a_range[1] - chunk_a_range[0]
+                print(self.chunk_indices[chunk_idx_a])
+                print(chunk_a_range)
+                print(chunk_a_rela_begin, chunk_a_rela_end)
+                chunk_data_a = np.load(os.path.join(self.result_unaligned_dir, f"chunk_{chunk_idx_a}.npy"), allow_pickle=True).item()
+                point_map_a = chunk_data_a['world_points'][chunk_a_rela_begin:chunk_a_rela_end]
+                conf_a = chunk_data_a['world_points_conf'][chunk_a_rela_begin:chunk_a_rela_end]
+
+                conf_threshold = min(np.median(conf_a), np.median(conf_loop)) * 0.1
+                mask = None
+                if item[1]['mask'] is not None:
+                    mask_loop = item[1]['mask'][:chunk_a_range[1] - chunk_a_range[0]]
+                    mask_a = chunk_data_a['mask'][chunk_a_rela_begin:chunk_a_rela_end]
+                    mask = mask_loop.squeeze() & mask_a.squeeze()
+                s_a, R_a, t_a = weighted_align_point_maps(point_map_a, conf_a, point_map_loop, conf_loop, mask, conf_threshold=conf_threshold, config=self.config)
+                print("Estimated Scale:", s_a)
+                print("Estimated Rotation:\n", R_a)
+                print("Estimated Translation:", t_a)
+
+                print('chunk_b align')
+                point_map_loop = item[1]['world_points'][-chunk_b_range[1] + chunk_b_range[0]:]
+                conf_loop = item[1]['world_points_conf'][-chunk_b_range[1] + chunk_b_range[0]:]
+                chunk_b_rela_begin = chunk_b_range[0] - self.chunk_indices[chunk_idx_b][0]
+                chunk_b_rela_end = chunk_b_rela_begin + chunk_b_range[1] - chunk_b_range[0]
+                print(chunk_b_range)
+                print(chunk_b_rela_begin, chunk_b_rela_end)
+                chunk_data_b = np.load(os.path.join(self.result_unaligned_dir, f"chunk_{chunk_idx_b}.npy"), allow_pickle=True).item()
+                point_map_b = chunk_data_b['world_points'][chunk_b_rela_begin:chunk_b_rela_end]
+                conf_b = chunk_data_b['world_points_conf'][chunk_b_rela_begin:chunk_b_rela_end]
+
+                conf_threshold = min(np.median(conf_b), np.median(conf_loop)) * 0.1
+                mask = None
+                if item[1]['mask'] is not None:
+                    mask_loop = item[1]['mask'][-chunk_b_range[1] + chunk_b_range[0]:]
+                    mask_b = chunk_data_b['mask'][chunk_b_rela_begin:chunk_b_rela_end]
+                    mask = mask_loop.squeeze() & mask_b.squeeze()
+                s_b, R_b, t_b = weighted_align_point_maps(point_map_b, conf_b, point_map_loop, conf_loop, mask, conf_threshold=conf_threshold, config=self.config)
+                print("Estimated Scale:", s_b)
+                print("Estimated Rotation:\n", R_b)
+                print("Estimated Translation:", t_b)
+
+                print("a -> b SIM 3")
+                s_ab, R_ab, t_ab = compute_sim3_ab((s_a, R_a, t_a), (s_b, R_b, t_b))
+                print("Estimated Scale:", s_ab)
+                print("Estimated Rotation:\n", R_ab)
+                print("Estimated Translation:", t_ab)
+                self.loop_sim3_list.append((chunk_idx_a, chunk_idx_b, (s_ab, R_ab, t_ab)))
+
+        if self.loop_enable:
+            input_abs_poses = self.loop_optimizer.sequential_to_absolute_poses(self.sim3_list)
+            self.sim3_list = self.loop_optimizer.optimize(self.sim3_list, self.loop_sim3_list)
+            optimized_abs_poses = self.loop_optimizer.sequential_to_absolute_poses(self.sim3_list)
+
+            def extract_xyz(pose_tensor):
+                poses = pose_tensor.cpu().numpy()
+                return poses[:, 0], poses[:, 1], poses[:, 2]
+
+            x0, _, y0 = extract_xyz(input_abs_poses)
+            x1, _, y1 = extract_xyz(optimized_abs_poses)
+            # Visual in png format
+            plt.figure(figsize=(8, 6))
+            plt.plot(x0, y0, 'o--', alpha=0.45, label='Before Optimization')
+            plt.plot(x1, y1, 'o-', label='After Optimization')
+            for i, j, _ in self.loop_sim3_list:
+                plt.plot([x0[i], x0[j]], [y0[i], y0[j]], 'r--', alpha=0.25, label='Loop (Before)' if i == 5 else "")
+                plt.plot([x1[i], x1[j]], [y1[i], y1[j]], 'g-', alpha=0.35, label='Loop (After)' if i == 5 else "")
+            plt.gca().set_aspect('equal')
+            plt.title("Sim3 Loop Closure Optimization")
+            plt.xlabel("x")
+            plt.ylabel("z")
+            plt.legend()
+            plt.grid(True)
+            plt.axis("equal")
+            save_path = os.path.join(self.output_dir, 'sim3_opt_result.png')
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.close()
+
+        print('Apply alignment...')
 
         print('Done.')
 
@@ -363,4 +449,30 @@ class VGGTLong:
         - Loop results
         ~50 GiB for 4500-frame KITTI 00, ~35 GiB for 2700-frame KITTI 05, or ~5 GiB for 300-frame short seq.
         """
-        
+        if not self.delete_temp_files:
+            return
+
+        total_space = 0
+        print(f'Deleting the temp files under {self.result_unaligned_dir}.')
+        for filename in os.listdir(self.result_unaligned_dir):
+            file_path = os.path.join(self.result_unaligned_dir, filename)
+            if os.path.isfile(file_path):
+                total_space += os.path.getsize(file_path)
+                os.remove(file_path)
+
+        print(f'Deleting the temp files under {self.result_aligned_dir}.')
+        for filename in os.listdir(self.result_aligned_dir):
+            file_path = os.path.join(self.result_aligned_dir, filename)
+            if os.path.isfile(file_path):
+                total_space += os.path.getsize(file_path)
+                os.remove(file_path)
+
+        print(f'Deleting the temp files under {self.result_loop_dir}.')
+        for filename in os.listdir(self.result_loop_dir):
+            file_path = os.path.join(self.result_loop_dir, filename)
+            if os.path.isfile(file_path):
+                total_space += os.path.getsize(file_path)
+                os.remove(file_path)
+        print('Deleting temp files done.')
+        print(f"Saved disk space: {total_space / 1024 / 1024 / 1024:.4f} GiB.")
+
