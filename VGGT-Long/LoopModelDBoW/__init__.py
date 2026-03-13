@@ -1,1 +1,1 @@
-from retrieval import RetrievalDBow
+from .retrieval import RetrievalDBow

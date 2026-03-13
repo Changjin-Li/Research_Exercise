@@ -397,24 +397,6 @@ def process_loop_list(self, chunk_index, loop_list, half_window=10):
 
     return results
 
-
-def robust_weighted_estimate_sim3(src, tgt, init_weights, delta=0.1, max_iters=20, tol=1e-9, using_sim3=True):
-    """
-    src:  (Nx3)
-    tgt:  (Nx3)
-    init_weights:  (N,)
-    """
-    s, R, t = np.zeros((1, 3, 3)), np.zeros((1, 3, 3)), np.zeros((1, 3, 1))
-    return s, R, t # TODO
-
-def robust_weighted_estimate_sim3_numba(src, tgt, init_weights, delta=0.1, max_iters=20, tol=1e-9, using_sim3=True):
-    src = src.astype(np.float32)
-    tgt = tgt.astype(np.float32)
-    init_weights = init_weights.astype(np.float32)
-
-    s, R, t = np.zeros((1, 3, 3)), np.zeros((1, 3, 3)), np.zeros((1, 3, 1))
-    return s, R, t # TODO
-
 def weighted_align_point_maps(point_map1, conf1, point_map2, conf2, mask, conf_threshold, config):
     """point_map2 -> point_map1"""
     b1 = point_map1.shape[0]
@@ -451,9 +433,16 @@ def weighted_align_point_maps(point_map1, conf1, point_map2, conf2, mask, conf_t
     print(f"The number of corresponding points matched: {all_pts1.shape[0]}")
 
     if config['Model']['align_method'] == 'numba':
-        s, R, t = robust_weighted_estimate_sim3_numba(all_pts2, all_pts1, all_weights, delta=config['Model']['IRLS']['delta'], max_iters=config['Model']['IRLS']['max_iters'], tol=eval(config['Model']['IRLS']['tol']), using_sim3=config['Model']['using_sim3'])
+        s, R, t = robust_weighted_estimate_sim3_numba(all_pts2, all_pts1, all_weights,
+                                                    delta=config['Model']['IRLS']['delta'],
+                                                    max_iters=config['Model']['IRLS']['max_iters'],
+                                                    tol=eval(config['Model']['IRLS']['tol']),
+                                                    using_sim3=config['Model']['using_sim3'])
     else:
-        s, R, t = robust_weighted_estimate_sim3(all_pts2, all_pts1, all_weights, delta=config['Model']['IRLS']['delta'], max_iters=config['Model']['IRLS']['max_iters'], tol=eval(config['Model']['IRLS']['tol']), using_sim3=config['Model']['using_sim3'])
+        s, R, t = robust_weighted_estimate_sim3(all_pts2, all_pts1, all_weights, delta=config['Model']['IRLS']['delta'],
+                                                max_iters=config['Model']['IRLS']['max_iters'],
+                                                tol=eval(config['Model']['IRLS']['tol']),
+                                                using_sim3=config['Model']['using_sim3'])
 
     mean_error = compute_alignment_error(point_map1, conf1, point_map2, conf2, conf_threshold, s, R, t)
     print(f'Mean error: {mean_error}')
@@ -525,3 +514,306 @@ def merge_ply_files(input_dir, output_path):
                     out_f.write(chunk)
     print(f"Merge completed! Total points: {total_vertices}")
     print(f"Output file: {output_path}")
+
+
+def huber_loss(r, delta):
+    abs_r = np.abs(r)
+    return np.where(abs_r <= delta, 0.5 * r ** 2, delta * (abs_r - 0.5 * delta))
+
+def weighted_estimate_se3(source_points, target_points, weights):
+    """
+    source_points:  (Nx3)
+    target_points:  (Nx3)
+    :weights:  (N,) [0,1]
+    """
+    total_weight = np.sum(weights)
+    if total_weight < 1e-6:
+        raise ValueError("Total weight too small for meaningful estimation")
+
+    normalized_weights = weights / total_weight
+
+    mu_src = np.sum(normalized_weights[:, None] * source_points, axis=0)
+    mu_tgt = np.sum(normalized_weights[:, None] * target_points, axis=0)
+
+    src_centered = source_points - mu_src
+    tgt_centered = target_points - mu_tgt
+
+    weighted_src = src_centered * np.sqrt(normalized_weights)[:, None]
+    weighted_tgt = tgt_centered * np.sqrt(normalized_weights)[:, None]
+
+    H = weighted_src.T @ weighted_tgt
+
+    U, _, Vt = np.linalg.svd(H)
+    R = Vt.T @ U.T
+
+    if np.linalg.det(R) < 0:
+        Vt[2, :] *= -1
+        R = Vt.T @ U.T
+
+    t = mu_tgt - R @ mu_src
+
+    return 1.0, R, t
+
+def weighted_estimate_sim3(source_points, target_points, weights):
+    """
+    source_points:  (Nx3)
+    target_points:  (Nx3)
+    :weights:  (N,) [0,1]
+    """
+    total_weight = np.sum(weights)
+    if total_weight < 1e-6:
+        raise ValueError("Total weight too small for meaningful estimation")
+
+    normalized_weights = weights / total_weight
+
+    mu_src = np.sum(normalized_weights[:, None] * source_points, axis=0)
+    mu_tgt = np.sum(normalized_weights[:, None] * target_points, axis=0)
+
+    src_centered = source_points - mu_src
+    tgt_centered = target_points - mu_tgt
+
+    scale_src = np.sqrt(np.sum(normalized_weights * np.sum(src_centered ** 2, axis=1)))
+    scale_tgt = np.sqrt(np.sum(normalized_weights * np.sum(tgt_centered ** 2, axis=1)))
+    s = scale_tgt / scale_src
+
+    weighted_src = (s * src_centered) * np.sqrt(normalized_weights)[:, None]
+    weighted_tgt = tgt_centered * np.sqrt(normalized_weights)[:, None]
+
+    H = weighted_src.T @ weighted_tgt
+
+    U, _, Vt = np.linalg.svd(H)
+    R = Vt.T @ U.T
+
+    if np.linalg.det(R) < 0:
+        Vt[2, :] *= -1
+        R = Vt.T @ U.T
+
+    t = mu_tgt - s * R @ mu_src
+    return s, R, t
+
+def robust_weighted_estimate_sim3(src, tgt, init_weights, delta=0.1, max_iters=20, tol=1e-9, using_sim3=True):
+    """
+    src:  (Nx3)
+    tgt:  (Nx3)
+    init_weights:  (N,)
+    """
+    if using_sim3:
+        s, R, t = weighted_estimate_sim3(src, tgt, init_weights)
+    else:
+        s, R, t = weighted_estimate_se3(src, tgt, init_weights)
+
+    prev_error = float('inf')
+    for _ in range(max_iters):
+        transformed = s * (src @ R.T) + t
+        residuals = np.linalg.norm(tgt - transformed, axis=1)  # (N,)
+        print(f'Residuals: {np.mean(residuals)}')
+
+        abs_res = np.abs(residuals)
+        huber_weights = np.ones_like(residuals)
+        large_res_mask = abs_res > delta
+        huber_weights[large_res_mask] = delta / abs_res[large_res_mask]
+        combined_weights = init_weights * huber_weights
+        combined_weights /= (np.sum(combined_weights) + 1e-12)
+
+        if using_sim3:
+            s_new, R_new, t_new = weighted_estimate_sim3(src, tgt, combined_weights)
+        else:
+            s_new, R_new, t_new = weighted_estimate_se3(src, tgt, combined_weights)
+
+        param_change = np.abs(s_new - s) + np.linalg.norm(t_new - t)
+        rot_angle = np.arccos(min(1.0, max(-1.0, (np.trace(R_new @ R.T) - 1) / 2.0)))
+        current_error = np.sum(huber_loss(residuals, delta) * init_weights)
+
+        if (param_change < tol and rot_angle < np.radians(0.1)) or (abs(prev_error - current_error) < tol * prev_error):
+            break
+
+        s, R, t = s_new, R_new, t_new
+        prev_error = current_error
+
+    return s, R, t
+
+# ===== Speed Up Begin
+
+@njit(cache=True)
+def _weighted_estimate_se3_numba(source_points, target_points, weights):
+    source_points = source_points.astype(np.float32)
+    target_points = target_points.astype(np.float32)
+    weights = weights.astype(np.float32)
+
+    total_weight = np.sum(weights)
+    if total_weight < 1e-6:
+        return 1.0, np.zeros(3, dtype=np.float32), np.zeros(3, dtype=np.float32), np.zeros((3, 3), dtype=np.float32)
+    normalized_weights = weights / total_weight
+
+    mu_src = np.sum(normalized_weights[:, None] * source_points, axis=0)
+    mu_tgt = np.sum(normalized_weights[:, None] * target_points, axis=0)
+    src_centered = source_points - mu_src
+    tgt_centered = target_points - mu_tgt
+
+    weighted_src = src_centered * np.sqrt(normalized_weights)[:, None]
+    weighted_tgt = tgt_centered * np.sqrt(normalized_weights)[:, None]
+
+    H = weighted_src.T @ weighted_tgt
+    return 1.0, mu_src, mu_tgt, H
+
+@njit(cache=True)
+def _weighted_estimate_sim3_numba(source_points, target_points, weights):
+    source_points = source_points.astype(np.float32)
+    target_points = target_points.astype(np.float32)
+    weights = weights.astype(np.float32)
+
+    total_weight = np.sum(weights)
+    if total_weight < 1e-6:
+        return -1.0, np.zeros(3, dtype=np.float32), np.zeros(3, dtype=np.float32), np.zeros((3, 3), dtype=np.float32)
+    normalized_weights = weights / total_weight
+
+    mu_src = np.sum(normalized_weights[:, None] * source_points, axis=0)
+    mu_tgt = np.sum(normalized_weights[:, None] * target_points, axis=0)
+    src_centered = source_points - mu_src
+    tgt_centered = target_points - mu_tgt
+
+    scale_src = np.sqrt(np.sum(normalized_weights * np.sum(src_centered ** 2, axis=1)))
+    scale_tgt = np.sqrt(np.sum(normalized_weights * np.sum(tgt_centered ** 2, axis=1)))
+    s = scale_tgt / scale_src
+
+    weighted_src = (s * src_centered) * np.sqrt(normalized_weights)[:, None]
+    weighted_tgt = tgt_centered * np.sqrt(normalized_weights)[:, None]
+
+    H = weighted_src.T @ weighted_tgt
+    return s, mu_src, mu_tgt, H
+
+def weighted_estimate_sim3_numba(source_points, target_points, weights, using_sim3=True):
+    if using_sim3:
+        s, mu_src, mu_tgt, H = _weighted_estimate_sim3_numba(source_points, target_points, weights)
+    else:
+        s, mu_src, mu_tgt, H = _weighted_estimate_se3_numba(source_points, target_points, weights)
+
+    if s < 0:
+        raise ValueError("Total weight too small for meaningful estimation.")
+
+    H = H.astype(np.float32)
+    U, _, Vt = np.linalg.svd(H)
+    R = Vt.T @ U.T
+    if np.linalg.det(R) < 0:
+        Vt[2, :] *= -1
+        R = Vt.T @ U.T
+
+    if using_sim3:
+        t = mu_tgt - s * R @ mu_src
+    else:
+        t = mu_tgt - R @ mu_src
+
+    return s, R, t
+
+@njit(cache=True)
+def huber_loss_numba(r, delta):
+    r = r.astype(np.float32)
+    delta = delta.astype(np.float32)
+    abs_r = np.abs(r)
+    result = np.where(abs_r <= delta, 0.5 * r**2, delta * (abs_r - 0.5 * delta))
+    return result.astype(np.float32)
+
+@njit(cache=True)
+def compute_residuals_numba(tgt, transformed):
+    residuals = np.empty(tgt.shape[0], dtype=np.float32)
+    for i in range(tgt.shape[0]):
+        diff = tgt[i] - transformed[i]
+        residuals[i] = np.sqrt(np.sum(diff ** 2))
+    return residuals
+
+@njit(cache=True)
+def compute_huber_weights_numba(residuals, delta):
+    weights = np.ones(residuals.shape, dtype=np.float32)
+    for i in range(residuals.shape[0]):
+        r = residuals[i]
+        if r > delta:
+            weights[i] = delta / r
+    return weights
+
+@njit(cache=True)
+def apply_transformation_numba(src, s, R, t):
+    transformed = np.empty_like(src)
+    for i in range(src.shape[0]):
+        transformed[i] = s * R @ src[i] + t
+    return transformed
+
+def robust_weighted_estimate_sim3_numba(src, tgt, init_weights, delta=0.1, max_iters=20, tol=1e-9, using_sim3=True):
+    src = src.astype(np.float32)
+    tgt = tgt.astype(np.float32)
+    init_weights = init_weights.astype(np.float32)
+
+    s, R, t = weighted_estimate_sim3_numba(src, tgt, init_weights, using_sim3=using_sim3)
+
+    prev_error = float('inf')
+    for _ in range(max_iters):
+        transformed = apply_transformation_numba(src, s, R, t)
+        residuals = compute_residuals_numba(tgt, transformed)
+        print(f'Residuals: {np.mean(residuals)}')
+        huber_weights = compute_huber_weights_numba(residuals, delta)
+        combined_weights = huber_weights * init_weights
+        combined_weights /= (np.sum(combined_weights) + 1e-12)
+
+        s_new, R_new, t_new = weighted_estimate_sim3_numba(src, tgt, combined_weights, using_sim3=using_sim3)
+        param_change = np.abs(s_new - s) + np.abs(t_new - t)
+        rot_angle = np.arccos(min(1.0, max(-1.0, (np.trace(R_new @ R.T) - 1) / 2.0)))
+        current_error = np.sum(huber_loss_numba(residuals, delta) * init_weights)
+
+        if (param_change < tol and rot_angle < np.radians(0.1)) or (abs(prev_error - current_error) < tol * prev_error):
+            break
+
+        s, R, t = s_new, R_new, t_new
+        prev_error = current_error
+
+    return s, R, t
+
+def warmup_numba():
+    print("\nWarming up Numba JIT-compiled functions...")
+
+    src = np.random.randn(50000, 3).astype(np.float32)
+    tgt = np.random.randn(50000, 3).astype(np.float32)
+    weights = np.random.rand(50000).astype(np.float32)
+    residuals = np.abs(np.random.randn(50000).astype(np.float32))
+    R = np.eye(3, dtype=np.float32)
+    t = np.zeros(3, dtype=np.float32)
+    s = np.float32(1.0)
+    delta = np.float32(1.0)
+
+    try:
+        _ = _weighted_estimate_sim3_numba(src, tgt, weights)
+        print(" - _weighted_estimate_sim3_numba warmed up.")
+    except Exception as e:
+        print(" ! Failed to warm up _weighted_estimate_sim3_numba:", e)
+
+        try:
+            _ = _weighted_estimate_se3_numba(src, tgt, weights)
+            print(" - _weighted_estimate_se3_numba warmed up.")
+        except Exception as e:
+            print(" ! Failed to warm up _weighted_estimate_se3_numba:", e)
+
+        try:
+            _ = huber_loss_numba(residuals, delta)
+            print(" - huber_loss_numba warmed up.")
+        except Exception as e:
+            print(" ! Failed to warm up huber_loss_numba:", e)
+
+        try:
+            _ = compute_huber_weights_numba(residuals, delta)
+            print(" - compute_huber_weights_numba warmed up.")
+        except Exception as e:
+            print(" ! Failed to warm up compute_huber_weights_numba:", e)
+
+        try:
+            _ = compute_residuals_numba(tgt, src)
+            print(" - compute_residuals_numba warmed up.")
+        except Exception as e:
+            print(" ! Failed to warm up compute_residuals_numba:", e)
+
+        try:
+            _ = apply_transformation_numba(src, s, R, t)
+            print(" - apply_transformation_numba warmed up.")
+        except Exception as e:
+            print(" ! Failed to warm up apply_transformation_numba:", e)
+
+        print("Numba warm-up complete.\n")
+
+# ===== Speed Up End =====

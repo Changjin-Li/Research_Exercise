@@ -12,7 +12,7 @@ try:
 except Exception as e:
     print(f"Sim3solve of C++ Version failed, Will using Python Version.")
 
-from fastloop import solve_system_py
+from loop_utils.fastloop import solve_system_py
 
 class Sim3LoopOptimizer:
     """Loop closure optimizer for sequences of Sim3 transformations."""

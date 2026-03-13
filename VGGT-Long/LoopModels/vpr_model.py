@@ -1,7 +1,7 @@
 import pytorch_lightning as pl
 import torch
-from torch.optim import lr_scheduler, optimizer
-import utils
+from torch.optim import lr_scheduler
+from LoopModels.utils import get_loss, get_miner, get_backbone, get_aggregator, get_validation_recalls
 
 class VPRModel(pl.LightningModule):
     """
@@ -54,13 +54,13 @@ class VPRModel(pl.LightningModule):
         self.miner_margin = miner_margin
         self.save_hyperparameters() # write hyperparams into a file
 
-        self.loss_fn = utils.get_loss(self.loss_name)
-        self.miner = utils.get_miner(self.miner_name, self.miner_margin)
+        self.loss_fn = get_loss(self.loss_name)
+        self.miner = get_miner(self.miner_name, self.miner_margin)
         self.batch_acc = [] # We will keep track of the % of trivial pairs/triplets at the loss level.
         self.faiss_gpu = faiss_gpu
 
-        self.backbone = utils.get_backbone(backbone_arch, backbone_config, vggt_long_config)
-        self.aggregator = utils.get_aggregator(aggregator_arch, aggregator_config)
+        self.backbone = get_backbone(backbone_arch, backbone_config, vggt_long_config)
+        self.aggregator = get_aggregator(aggregator_arch, aggregator_config)
         self.val_outputs = []
 
     def forward(self, x):
@@ -170,7 +170,7 @@ class VPRModel(pl.LightningModule):
 
             r_list = feats[:num_references]
             q_list = feats[num_references:]
-            pitts_dict = utils.get_validation_recalls(
+            pitts_dict = get_validation_recalls(
                 r_list=r_list,
                 q_list=q_list,
                 k_values=[1, 5, 10, 20, 30, 50, 100],
