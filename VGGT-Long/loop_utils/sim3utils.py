@@ -4,7 +4,6 @@ import trimesh
 import glob
 import bisect
 from numba import njit
-from torch.ao.quantization.utils import weight_is_quantized
 
 
 def accumulate_sim3_transforms(transforms):
